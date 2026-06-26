@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type TaskStatus = "todo" | "in_progress" | "done";
 
@@ -21,6 +21,7 @@ type Task = {
 };
 
 const statuses: TaskStatus[] = ["todo", "in_progress", "done"];
+const TASKS_PER_PAGE = 10;
 
 const statusLabels: Record<TaskStatus, string> = {
   todo: "Da fare",
@@ -41,9 +42,12 @@ const statusDotClasses: Record<TaskStatus, string> = {
 };
 
 export default function Home() {
+  const [initializing, setInitializing] = useState(true);
   const [user, setUser] = useState<User | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [filter, setFilter] = useState<TaskStatus | "all">("all");
+  const [currentPage, setCurrentPage] = useState(1);
+
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -60,6 +64,50 @@ export default function Home() {
   const [editingTitle, setEditingTitle] = useState("");
   const [editingDescription, setEditingDescription] = useState("");
 
+  useEffect(() => {
+    let active = true;
+
+    async function restoreSession() {
+      try {
+        const meResponse = await fetch("/api/auth/me");
+        const meData = await meResponse.json().catch(() => null);
+
+        if (!active) {
+          return;
+        }
+
+        if (!meResponse.ok || !meData?.user) {
+          setUser(null);
+          setTasks([]);
+          return;
+        }
+
+        setUser(meData.user);
+
+        const tasksResponse = await fetch("/api/tasks");
+        const tasksData = await tasksResponse.json().catch(() => null);
+
+        if (!active) {
+          return;
+        }
+
+        if (tasksResponse.ok && Array.isArray(tasksData?.tasks)) {
+          setTasks(tasksData.tasks);
+        }
+      } finally {
+        if (active) {
+          setInitializing(false);
+        }
+      }
+    }
+
+    void restoreSession();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const stats = useMemo(() => {
     return {
       total: tasks.length,
@@ -68,6 +116,13 @@ export default function Home() {
       done: tasks.filter((task) => task.status === "done").length,
     };
   }, [tasks]);
+
+  const totalPages = Math.max(1, Math.ceil(tasks.length / TASKS_PER_PAGE));
+
+  const paginatedTasks = useMemo(() => {
+    const start = (currentPage - 1) * TASKS_PER_PAGE;
+    return tasks.slice(start, start + TASKS_PER_PAGE);
+  }, [tasks, currentPage]);
 
   async function request<T>(url: string, options?: RequestInit): Promise<T> {
     const response = await fetch(url, {
@@ -95,6 +150,7 @@ export default function Home() {
       const query = currentFilter === "all" ? "" : `?status=${currentFilter}`;
       const data = await request<{ tasks: Task[] }>(`/api/tasks${query}`);
       setTasks(data.tasks);
+      setCurrentPage(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Errore caricamento task.");
     } finally {
@@ -130,16 +186,25 @@ export default function Home() {
 
       const tasksData = await request<{ tasks: Task[] }>("/api/tasks");
       setTasks(tasksData.tasks);
+      setCurrentPage(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Errore autenticazione.");
     }
   }
 
   async function handleLogout() {
-    await request("/api/auth/logout", { method: "POST" });
-    setUser(null);
-    setTasks([]);
-    setMessage("Logout effettuato.");
+    setError("");
+    setMessage("");
+
+    try {
+      await request("/api/auth/logout", { method: "POST" });
+      setUser(null);
+      setTasks([]);
+      setCurrentPage(1);
+      setMessage("Logout effettuato.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Errore logout.");
+    }
   }
 
   async function createTask(event: FormEvent) {
@@ -228,7 +293,20 @@ export default function Home() {
 
   async function changeFilter(value: TaskStatus | "all") {
     setFilter(value);
+    setCurrentPage(1);
     await loadTasks(value);
+  }
+
+  if (initializing) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6 text-white">
+        <div className="rounded-3xl border border-white/10 bg-white/10 p-8 text-center shadow-2xl">
+          <p className="text-4xl">⚙️</p>
+          <h1 className="mt-4 text-2xl font-black">Caricamento...</h1>
+          <p className="mt-2 text-slate-300">Verifico la sessione attiva.</p>
+        </div>
+      </main>
+    );
   }
 
   if (!user) {
@@ -248,21 +326,6 @@ export default function Home() {
               CRUD task, filtro per stato, autenticazione, sessioni HTTP-only,
               persistenza SQLite e API REST con Next.js.
             </p>
-
-            <div className="mt-8 grid max-w-xl grid-cols-3 gap-3 text-center">
-              <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-                <p className="text-2xl font-bold">REST</p>
-                <p className="text-sm text-slate-300">API</p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-                <p className="text-2xl font-bold">SQLite</p>
-                <p className="text-sm text-slate-300">Database</p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-                <p className="text-2xl font-bold">Next</p>
-                <p className="text-sm text-slate-300">Frontend</p>
-              </div>
-            </div>
           </div>
 
           <div className="rounded-3xl border border-white/10 bg-white p-6 text-slate-950 shadow-2xl">
@@ -270,10 +333,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setAuthMode("register")}
-                className={`flex-1 rounded-xl px-4 py-3 font-semibold ${
+                className={`flex-1 cursor-pointer rounded-xl px-4 py-3 font-semibold transition ${
                   authMode === "register"
                     ? "bg-slate-950 text-white"
-                    : "text-slate-600"
+                    : "text-slate-600 hover:bg-white"
                 }`}
               >
                 Registrati
@@ -282,10 +345,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setAuthMode("login")}
-                className={`flex-1 rounded-xl px-4 py-3 font-semibold ${
+                className={`flex-1 cursor-pointer rounded-xl px-4 py-3 font-semibold transition ${
                   authMode === "login"
                     ? "bg-slate-950 text-white"
-                    : "text-slate-600"
+                    : "text-slate-600 hover:bg-white"
                 }`}
               >
                 Accedi
@@ -295,7 +358,7 @@ export default function Home() {
             <form onSubmit={handleAuth} className="space-y-4">
               {authMode === "register" && (
                 <input
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-slate-950"
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none transition focus:border-slate-950"
                   value={displayName}
                   onChange={(event) => setDisplayName(event.target.value)}
                   placeholder="Nome"
@@ -303,34 +366,34 @@ export default function Home() {
               )}
 
               <input
-                className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-slate-950"
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none transition focus:border-slate-950"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 placeholder="Email"
               />
 
               <input
-                className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-slate-950"
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none transition focus:border-slate-950"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 placeholder="Password"
                 type="password"
               />
 
-              <button className="w-full rounded-2xl bg-slate-950 px-5 py-4 font-bold text-white transition hover:bg-slate-800">
+              <button className="w-full cursor-pointer rounded-2xl bg-slate-950 px-5 py-4 font-bold text-white transition hover:bg-slate-800">
                 {authMode === "register" ? "Crea account" : "Entra"}
               </button>
             </form>
 
             {message && (
-              <p className="mt-4 rounded-2xl bg-emerald-50 p-4 text-emerald-700">
-                {message}
+              <p className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 font-medium text-emerald-700">
+                ✅ {message}
               </p>
             )}
 
             {error && (
-              <p className="mt-4 rounded-2xl bg-red-50 p-4 text-red-700">
-                {error}
+              <p className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 font-medium text-red-700">
+                ⚠️ {error}
               </p>
             )}
           </div>
@@ -360,7 +423,7 @@ export default function Home() {
             <button
               type="button"
               onClick={handleLogout}
-              className="rounded-2xl border border-white/20 px-5 py-3 font-semibold text-white transition hover:bg-white hover:text-slate-950"
+              className="cursor-pointer rounded-2xl border border-white/20 px-5 py-3 font-semibold text-white transition hover:bg-white hover:text-slate-950"
             >
               Logout
             </button>
@@ -369,7 +432,7 @@ export default function Home() {
           <div className="mt-8 grid gap-4 sm:grid-cols-4">
             <div className="rounded-2xl bg-white/10 p-4">
               <p className="text-3xl font-black">{stats.total}</p>
-              <p className="text-sm text-slate-300">Totali</p>
+              <p className="text-sm text-slate-300">Risultati</p>
             </div>
             <div className="rounded-2xl bg-white/10 p-4">
               <p className="text-3xl font-black">{stats.todo}</p>
@@ -396,20 +459,20 @@ export default function Home() {
 
             <form onSubmit={createTask} className="mt-6 space-y-4">
               <input
-                className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-slate-950"
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none transition focus:border-slate-950"
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 placeholder="Titolo attività"
               />
 
               <textarea
-                className="min-h-32 w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-slate-950"
+                className="min-h-32 w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none transition focus:border-slate-950"
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="Descrizione"
               />
 
-              <button className="w-full rounded-2xl bg-slate-950 px-5 py-4 font-bold text-white transition hover:bg-slate-800">
+              <button className="w-full cursor-pointer rounded-2xl bg-slate-950 px-5 py-4 font-bold text-white transition hover:bg-slate-800">
                 Crea task
               </button>
             </form>
@@ -421,7 +484,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => changeFilter("all")}
-                  className={`rounded-2xl border px-4 py-3 font-semibold transition ${
+                  className={`cursor-pointer rounded-2xl border px-4 py-3 font-semibold transition ${
                     filter === "all"
                       ? "border-slate-950 bg-slate-950 text-white"
                       : "border-slate-200 bg-white hover:bg-slate-50"
@@ -435,7 +498,7 @@ export default function Home() {
                     type="button"
                     key={status}
                     onClick={() => changeFilter(status)}
-                    className={`rounded-2xl border px-4 py-3 font-semibold transition ${
+                    className={`cursor-pointer rounded-2xl border px-4 py-3 font-semibold transition ${
                       filter === status
                         ? "border-slate-950 bg-slate-950 text-white"
                         : "border-slate-200 bg-white hover:bg-slate-50"
@@ -450,14 +513,14 @@ export default function Home() {
 
           <section className="space-y-4">
             {message && (
-              <p className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-700">
-                {message}
+              <p className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 font-medium text-emerald-700">
+                ✅ {message}
               </p>
             )}
 
             {error && (
-              <p className="rounded-2xl border border-red-200 bg-red-50 p-4 text-red-700">
-                {error}
+              <p className="rounded-2xl border border-red-200 bg-red-50 p-4 font-medium text-red-700">
+                ⚠️ {error}
               </p>
             )}
 
@@ -480,7 +543,7 @@ export default function Home() {
             )}
 
             <div className="space-y-4">
-              {tasks.map((task) => (
+              {paginatedTasks.map((task) => (
                 <article
                   key={task.id}
                   className="rounded-3xl bg-white p-6 shadow-sm transition hover:shadow-md"
@@ -488,7 +551,7 @@ export default function Home() {
                   {editingId === task.id ? (
                     <div className="space-y-4">
                       <input
-                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 text-lg font-bold outline-none focus:border-slate-950"
+                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 text-lg font-bold outline-none transition focus:border-slate-950"
                         value={editingTitle}
                         onChange={(event) =>
                           setEditingTitle(event.target.value)
@@ -496,7 +559,7 @@ export default function Home() {
                       />
 
                       <textarea
-                        className="min-h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none focus:border-slate-950"
+                        className="min-h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 outline-none transition focus:border-slate-950"
                         value={editingDescription}
                         onChange={(event) =>
                           setEditingDescription(event.target.value)
@@ -507,7 +570,7 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => saveEditing(task)}
-                          className="rounded-2xl bg-slate-950 px-5 py-3 font-bold text-white"
+                          className="cursor-pointer rounded-2xl bg-slate-950 px-5 py-3 font-bold text-white transition hover:bg-slate-800"
                         >
                           Salva modifiche
                         </button>
@@ -515,7 +578,7 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => setEditingId(null)}
-                          className="rounded-2xl border border-slate-200 px-5 py-3 font-semibold"
+                          className="cursor-pointer rounded-2xl border border-slate-200 px-5 py-3 font-semibold transition hover:bg-slate-50"
                         >
                           Annulla
                         </button>
@@ -549,7 +612,7 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => deleteTask(task)}
-                          className="rounded-2xl border border-red-200 px-4 py-2 font-semibold text-red-700 transition hover:bg-red-50"
+                          className="cursor-pointer rounded-2xl border border-red-200 px-4 py-2 font-semibold text-red-700 transition hover:bg-red-50"
                         >
                           Elimina
                         </button>
@@ -568,7 +631,7 @@ export default function Home() {
                             type="button"
                             key={status}
                             onClick={() => updateStatus(task, status)}
-                            className={`rounded-2xl border px-4 py-2 text-sm font-bold transition ${
+                            className={`cursor-pointer rounded-2xl border px-4 py-2 text-sm font-bold transition ${
                               task.status === status
                                 ? "border-slate-950 bg-slate-950 text-white"
                                 : "border-slate-200 hover:bg-slate-50"
@@ -581,7 +644,7 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => startEditing(task)}
-                          className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-bold transition hover:bg-slate-50"
+                          className="cursor-pointer rounded-2xl border border-slate-200 px-4 py-2 text-sm font-bold transition hover:bg-slate-50"
                         >
                           Modifica
                         </button>
@@ -601,6 +664,34 @@ export default function Home() {
                 </article>
               ))}
             </div>
+
+            {!loading && tasks.length > TASKS_PER_PAGE && (
+              <div className="flex flex-col items-center justify-between gap-3 rounded-3xl bg-white p-4 shadow-sm sm:flex-row">
+                <p className="text-sm font-medium text-slate-500">
+                  Pagina {currentPage} di {totalPages} — {tasks.length} attività
+                </p>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={currentPage === 1}
+                    onClick={() => setCurrentPage((page) => page - 1)}
+                    className="cursor-pointer rounded-2xl border border-slate-200 px-4 py-2 font-bold transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    ← Precedente
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={currentPage === totalPages}
+                    onClick={() => setCurrentPage((page) => page + 1)}
+                    className="cursor-pointer rounded-2xl border border-slate-200 px-4 py-2 font-bold transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Successiva →
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
         </div>
       </section>
